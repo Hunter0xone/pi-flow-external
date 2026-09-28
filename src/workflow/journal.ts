@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdir, open, readFile, readdir } from "node:fs/promises";
 import { basename, dirname, extname, join } from "node:path";
 import { hashStableValue } from "./replay-cache.ts";
 import { WORKFLOW_API_VERSION, type ChildRunOutcome, type WorkflowAgentQueuedEvent, type WorkflowAgentResultEvent, type WorkflowCachedAgentResult } from "./types.ts";
@@ -84,9 +85,9 @@ export async function persistWorkflowScript(params: {
   scriptHash: string;
   script: string;
 }): Promise<string> {
-  await mkdir(params.dir, { recursive: true });
+  await ensurePrivateWorkflowDir(params.dir);
   const path = join(params.dir, `${safeFilePart(params.metaName)}-${params.scriptHash.slice(0, 12)}.js`);
-  await writeFile(path, params.script, "utf8");
+  await writePrivateWorkflowFile(path, params.script);
   return path;
 }
 
@@ -255,9 +256,9 @@ export async function createWorkflowJournalWriter(params: {
   scriptPath?: string;
   resumeFromRunId?: string;
 }): Promise<WorkflowJournalWriter> {
-  await mkdir(params.dir, { recursive: true, mode: 0o700 });
+  await ensurePrivateWorkflowDir(params.dir);
   const path = workflowJournalPath(params.dir, params.identity.runId);
-  await writeFile(
+  await writePrivateWorkflowFile(
     path,
     `${JSON.stringify({
       type: "run_start",
@@ -273,7 +274,6 @@ export async function createWorkflowJournalWriter(params: {
       scriptHash: params.identity.scriptHash,
       argsHash: params.identity.argsHash,
     })}\n`,
-    { encoding: "utf8", mode: 0o600 },
   );
 
   let appendQueue = Promise.resolve();
@@ -328,7 +328,7 @@ function workflowJournalPath(dir: string, runId: string): string {
 }
 
 async function appendJsonLine(path: string, value: unknown): Promise<void> {
-  await appendFile(path, `${JSON.stringify(value)}\n`, "utf8");
+  await writePrivateWorkflowFile(path, `${JSON.stringify(value)}\n`, true);
 }
 
 function safeFilePart(value: string): string {
@@ -337,4 +337,25 @@ function safeFilePart(value: string): string {
 
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "ENOENT";
+}
+
+// mkdir's mode only applies to new directories. Tighten legacy workflow
+// directories too, before writing any prompt, script, or result into them.
+async function ensurePrivateWorkflowDir(dir: string): Promise<void> {
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  if (!(await lstat(dir)).isDirectory()) throw new Error(`Workflow directory must be a real directory: ${dir}`);
+  await chmod(dir, 0o700);
+}
+
+async function writePrivateWorkflowFile(path: string, text: string, append = false): Promise<void> {
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW
+    | (append ? constants.O_APPEND : constants.O_TRUNC);
+  const file = await open(path, flags, 0o600);
+  try {
+    // Opening an existing file does not apply mode. Repair it before writing.
+    await file.chmod(0o600);
+    await file.writeFile(text, "utf8");
+  } finally {
+    await file.close();
+  }
 }
