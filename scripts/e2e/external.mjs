@@ -111,6 +111,20 @@ function parseArgs(argv) {
   return options;
 }
 
+// Claim a fresh directory exclusively before writing fixtures or registering
+// cleanup. Never adopt a caller-owned directory (including a symlink).
+function createRunRoot(runRoot) {
+  mkdirSync(path.dirname(runRoot), { recursive: true });
+  try {
+    mkdirSync(runRoot, { mode: 0o700 });
+  } catch (error) {
+    if (error.code === "EEXIST") {
+      throw new Error("--run-root must not already exist; choose a new directory. Existing files were left untouched.");
+    }
+    throw error;
+  }
+}
+
 function help() {
   console.log(`Usage: npm run e2e -- [options]
 
@@ -123,7 +137,7 @@ function help() {
   --workflow                    test a blocking two-child workflow instead of a single direct Agent call
   --interrupt                   launch a background Agent, then cancel/wait/inspect it through external_runs
   --agent-dir <dir>             Pi agent directory (default: isolated under run root; real dir for --backend pi)
-  --run-root <dir>              temporary output directory
+  --run-root <dir>              new temporary output directory (must not already exist)
   --timeout-ms <ms>             per-child subagent timeout, and basis for the script's own watchdog (default: 180000)
   --keep                        preserve profile and output
 
@@ -343,7 +357,7 @@ async function runRoutingSmoke(options) {
   // precede the try/finally. Every other failure (preflight, fixture,
   // profile, or model-mirroring setup) must still reach the same cleanup,
   // or a leftover temp directory survives an early throw.
-  mkdirSync(options.runRoot, { recursive: true });
+  createRunRoot(options.runRoot);
 
   let profilePath;
   let result;
@@ -711,7 +725,7 @@ async function runDeterministic(options) {
   // the only statement outside it. Every other failure — including a
   // preflight rejection, the single most common real-world one for
   // --backend pi — must still reach the same cleanup.
-  mkdirSync(options.runRoot, { recursive: true });
+  createRunRoot(options.runRoot);
 
   let profilePath;
   let built;

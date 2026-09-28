@@ -1,11 +1,12 @@
 import { chmodSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-const scriptPath = new URL("../scripts/e2e/external.mjs", import.meta.url).pathname;
+const scriptPath = fileURLToPath(new URL("../scripts/e2e/external.mjs", import.meta.url));
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -53,6 +54,21 @@ function runScript(args: string[], env: Record<string, string | undefined> = {},
 }
 
 describe("e2e external script argument validation", () => {
+  it.each([[[]], [["--routing-smoke"]]])("refuses existing run roots before modifying caller files (%j)", async (lane) => {
+    const parent = await makeAgentDir();
+    const sentinel = join(parent, "sentinel.txt");
+    await writeFile(sentinel, "keep me");
+    const link = join(await makeAgentDir(), "linked-root");
+    await symlink(parent, link);
+    for (const runRoot of [parent, link]) {
+      const result = runScript(["--run-root", runRoot, ...lane]);
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toContain("--run-root must not already exist");
+      expect(await readdir(parent)).toEqual(["sentinel.txt"]);
+      expect(await readFile(sentinel, "utf8")).toBe("keep me");
+    }
+  });
+
   it("rejects an unknown --backend value", () => {
     const result = runScript(["--backend", "gemini"]);
     expect(result.code).not.toBe(0);
@@ -256,14 +272,17 @@ setInterval(() => {}, 1000);
 
   it("runs a direct Agent call against a fake codex binary with no root LLM call", async () => {
     const binDir = await makeFakeCodexBin(readingReplyScript());
-    const result = runScript(["--backend", "codex"], { PATH: `${binDir}:${process.env.PATH ?? ""}` }, 20_000);
+    const parent = await makeAgentDir();
+    await writeFile(join(parent, "sentinel.txt"), "keep me");
+    const result = runScript(["--backend", "codex", "--run-root", join(parent, "run")], { PATH: `${binDir}:${process.env.PATH ?? ""}` }, 20_000);
     expect(result.code, result.stderr).toBe(0);
     expect(result.stdout).toContain("PASS codex Agent deterministic E2E");
+    expect(await readdir(parent)).toEqual(["sentinel.txt"]);
   });
 
   it("passes explicit --permission danger and writes a version 4 settings plus override fixture", async () => {
     const binDir = await makeFakeCodexBin(readingReplyScript());
-    const runRoot = await makeAgentDir();
+    const runRoot = join(await makeAgentDir(), "run");
     const result = runScript(
       ["--backend", "codex", "--permission", "danger", "--keep", "--run-root", runRoot],
       { PATH: `${binDir}:${process.env.PATH ?? ""}` },
