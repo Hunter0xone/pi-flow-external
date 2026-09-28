@@ -1,6 +1,8 @@
-import { readFile, readdir, rm, stat } from "node:fs/promises";
+import { lstat, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+
+import { isCompletedRunRecord } from "./run-inspection.ts";
 
 const RUN_RECORDS_DIRECTORY_ENV = "PI_FLOW_EXTERNAL_RUNS_DIR";
 
@@ -13,9 +15,9 @@ export function runRecordsDirectory(): string {
 /**
  * Prune completed run records beyond `maxRecords`, oldest first.
  *
- * Only records whose `summary.json` exists are eligible: a record without a
- * summary is either still running or was interrupted, and deleting it could
- * kill the evidence of an active run. `maxRecords <= 0` keeps everything.
+ * Only validated, fully persisted terminal records are eligible. Active,
+ * interrupted, incomplete, and damaged evidence stays. `maxRecords <= 0`
+ * keeps everything.
  */
 export async function pruneRunRecords(
   runsDirectory: string,
@@ -38,17 +40,13 @@ export async function pruneRunRecords(
     }
     const directory = join(runsDirectory, entry);
     try {
-      // A summary is only a completion marker when it parses and matches its
-      // run directory; damaged or partial evidence stays untouched.
-      const summary = JSON.parse(await readFile(join(directory, "summary.json"), "utf8")) as Record<string, unknown>;
-      if (summary.runId !== entry) {
-        continue;
-      }
+      const info = await lstat(directory);
+      if (!info.isDirectory() || !await isCompletedRunRecord(runsDirectory, entry)) continue;
+      completed.push({ directory, mtimeMs: info.mtimeMs });
     } catch {
       // Incomplete, active, or damaged: never eligible for pruning.
       continue;
     }
-    completed.push({ directory, mtimeMs: (await stat(directory)).mtimeMs });
   }
   completed.sort((a, b) => a.mtimeMs - b.mtimeMs);
   const pruned: string[] = [];

@@ -92,12 +92,16 @@ type InspectionCursor = CursorBase & (
   | { source: "summary"; itemIndex: 0; textOffset: number; revision: string }
 );
 interface ListCursor { v: typeof CURSOR_VERSION; kind: "list"; scope: string; after: string }
-interface SummaryDocument { runId?: string; queuedAt?: string; startedAt?: string; finishedAt?: string; metadata?: unknown; summary?: unknown }
+interface SummaryDocument { version?: number; eventCount?: number; attemptedEventCount?: number; writeErrorCount?: number; runId?: string; queuedAt?: string; startedAt?: string; finishedAt?: string; metadata?: unknown; summary?: unknown }
 interface SummaryState { document?: SummaryDocument; integrity: RunRecordIntegrity }
 interface EvidenceEvent { runId?: string; sequence?: number; timestamp?: string; type?: string; data?: unknown }
 interface CompleteLine { start: number; end: number; text: string }
 interface ScanResult { missing: boolean; stopped: boolean; truncatedTail: boolean; malformed: boolean; endPosition: number }
 interface RunObservation {
+  eventCount: number;
+  validSequence: boolean;
+  started: boolean;
+  finished: boolean;
   launch?: Record<string, unknown>;
   applied?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
@@ -338,6 +342,23 @@ export async function getRunRecord(runsDirectory: string, runId: string): Promis
   return readListItem(runsDirectory, runId);
 }
 
+/** Destructive retention uses the same summary/event readers as inspection,
+ * with positive proof of a fully persisted terminal record before deletion. */
+export async function isCompletedRunRecord(runsDirectory: string, runId: string): Promise<boolean> {
+  assertRunId(runId);
+  const directory = join(runsDirectory, runId);
+  const summary = await readSummary(join(directory, "summary.json"), runId);
+  const document = summary.document;
+  const status = asRecord(document?.summary)?.status;
+  if (!document || document.version !== 1 || !["done", "error", "aborted"].includes(status as string)
+    || documentTime(document.finishedAt) === undefined || (document.writeErrorCount ?? 0) !== 0) return false;
+  const observation = await readObservation(join(directory, "events.ndjson"), runId);
+  return mergedIntegrity(summary, observation) === "complete"
+    && observation.started && observation.finished && observation.validSequence
+    && document.eventCount === observation.eventCount
+    && (document.attemptedEventCount === undefined || document.attemptedEventCount === observation.eventCount);
+}
+
 async function readListItem(runsDirectory: string, runId: string): Promise<RunRecordListItem | undefined> {
   const directory = join(runsDirectory, runId);
   const summary = await readSummary(join(directory, "summary.json"), runId);
@@ -405,10 +426,14 @@ function documentTime(value: unknown): number | undefined {
 }
 
 async function readObservation(eventsPath: string, runId: string): Promise<RunObservation> {
-  const observation: RunObservation = { outputAvailable: false, integrity: "incomplete", truncatedTail: false };
+  const observation: RunObservation = { eventCount: 0, validSequence: true, started: false, finished: false, outputAvailable: false, integrity: "incomplete", truncatedTail: false };
   const scan = await scanCompleteLines(eventsPath, 0, (line) => {
     const event = parseEvent(line.text, runId);
     if (!event) return "malformed";
+    observation.validSequence &&= event.sequence === observation.eventCount;
+    if (observation.eventCount === 0) observation.started = event.type === "run_started";
+    observation.eventCount++;
+    observation.finished = event.type === "run_finished";
     if (event.type === "run_started") {
       observation.metadata = asRecord(event.data);
       observation.queuedAt = asString(observation.metadata?.queuedAt) ?? event.timestamp;
