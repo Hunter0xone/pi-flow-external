@@ -290,7 +290,8 @@ describe("pi_flow_harness_create tool", () => {
       );
       expect(skills.details.status).toBe("done");
       expect(spawnSubagent).toHaveBeenCalledWith(expect.objectContaining({
-        profile: expect.objectContaining({ backend: "pi", harness: "pi-deepseek", preset: "skills" }),
+        permission: "readonly",
+        profile: expect.objectContaining({ backend: "pi", harness: "pi-deepseek", preset: "skills", tools: [] }),
       }));
       expect(ctx.ui.confirm).toHaveBeenCalledWith("Register pi-deepseek?", expect.stringContaining("Preset: skills"), { signal: undefined });
 
@@ -304,7 +305,8 @@ describe("pi_flow_harness_create tool", () => {
       );
       expect(minimal.details.status).toBe("done");
       expect(spawnSubagent).toHaveBeenCalledWith(expect.objectContaining({
-        profile: expect.objectContaining({ backend: "pi", harness: "pi-glm", preset: "minimal" }),
+        permission: "readonly",
+        profile: expect.objectContaining({ backend: "pi", harness: "pi-glm", preset: "minimal", tools: [] }),
       }));
       const saved = JSON.parse(readFileSync(join(agentDir, "pi-flow-external", "settings.json"), "utf8")) as {
         harnesses: Record<string, { preset?: string }>;
